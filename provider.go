@@ -145,7 +145,9 @@ func Dispatch(ctx context.Context, p Provider, prompt, dir string, wall, idle ti
 		mu       sync.Mutex
 		lastSeen = time.Now()
 		o        Outcome
-		texts    []string
+		// Only the newest assistant text is ever read. Keeping every one held
+		// a whole session's transcript in memory for nothing.
+		lastText string
 		rawTail  []string
 		apiErrs  []string // what api_retry lines said, newest last
 		gotRes   bool
@@ -191,7 +193,7 @@ func Dispatch(ctx context.Context, p Provider, prompt, dir string, wall, idle ti
 					if sl.Message != nil {
 						for _, c := range sl.Message.Content {
 							if c.Type == "text" && c.Text != "" {
-								texts = append(texts, c.Text)
+								lastText = c.Text
 							}
 						}
 					}
@@ -224,28 +226,47 @@ func Dispatch(ctx context.Context, p Provider, prompt, dir string, wall, idle ti
 	defer tick.Stop()
 	wallT := time.NewTimer(wall)
 	defer wallT.Stop()
+
+	// A watchdog fires once. ctx.Done() is a *closed* channel, not a one-shot
+	// tick: left selectable after cancellation it is ready on every pass, so
+	// this loop spun millions of iterations a second and started a killGroup
+	// goroutine on each one — enough to exhaust the machine's memory in the
+	// seconds between Ctrl-C and the child actually dying. Reading through
+	// local channel variables lets a spent watchdog nil itself out; a nil
+	// channel blocks forever, so what remains is the one case that should end
+	// the loop: `done`, closed when the child's stdout hits EOF.
+	ctxC, wallC, tickC := ctx.Done(), wallT.C, tick.C
+	stopKill := func() {}
+	fire := func(k OutcomeKind) {
+		if killedBy != "" {
+			return
+		}
+		killedBy = k
+		stopKill = killGroup(cmd)
+		ctxC, wallC, tickC = nil, nil, nil
+	}
 loop:
 	for {
 		select {
 		case <-done:
 			break loop
-		case <-ctx.Done():
-			killedBy = OutFailed
-			killGroup(cmd)
-		case <-wallT.C:
-			killedBy = OutTimeout
-			killGroup(cmd)
-		case <-tick.C:
+		case <-ctxC:
+			fire(OutFailed)
+		case <-wallC:
+			fire(OutTimeout)
+		case <-tickC:
 			mu.Lock()
 			quiet := time.Since(lastSeen)
 			mu.Unlock()
-			if idle > 0 && quiet > idle && killedBy == "" {
-				killedBy = OutIdle
-				killGroup(cmd)
+			if idle > 0 && quiet > idle {
+				fire(OutIdle)
 			}
 		}
 	}
 	werr := cmd.Wait()
+	// The child is reaped, so its pid means nothing now: call off any pending
+	// SIGKILL before the kernel hands that number to something else.
+	stopKill()
 	if ee, ok := werr.(*exec.ExitError); ok {
 		o.Exit = ee.ExitCode()
 	} else if werr != nil {
@@ -270,8 +291,8 @@ loop:
 		}
 		return o
 	}
-	if o.Text == "" && len(texts) > 0 {
-		o.Text = texts[len(texts)-1]
+	if o.Text == "" && lastText != "" {
+		o.Text = lastText
 	}
 	// 2 · the result object
 	if gotRes && o.Kind == "" && o.Exit == 0 {
@@ -445,15 +466,27 @@ func providerEnv(p Provider) []string {
 	return env
 }
 
-func killGroup(cmd *exec.Cmd) {
+// killGroup stops the session's whole process group — SIGTERM, then SIGKILL
+// five seconds later if it is still there — and returns a func that calls the
+// escalation off. The caller must run that func once cmd.Wait() has reaped the
+// child: a reaped pid is just a number the kernel is free to reissue, and a
+// stray SIGKILL aimed at it afterwards lands on whatever now holds it.
+func killGroup(cmd *exec.Cmd) (stop func()) {
 	if cmd.Process == nil {
-		return
+		return func() {}
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	go func(pid int) {
-		time.Sleep(5 * time.Second)
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-	}(cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 type limitedWriter struct {
