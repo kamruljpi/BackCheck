@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1189,5 +1190,55 @@ func TestAutoUsesAHandWrittenDraftAndRefusesToBlessItAlone(t *testing.T) {
 	json.Unmarshal([]byte(readFileOr(filepath.Join(root2, ".backcheck", "draft", "rails.json"), "")), &rails)
 	if got := lintRails(rails, root2); len(got) == 0 {
 		t.Error("a hand-written draft is linted too — an empty gate is still an empty gate")
+	}
+}
+
+// A cancelled context closes its Done channel for good — unlike a timer tick,
+// it stays ready. The watchdog select used to leave that case selectable after
+// firing, so one Ctrl-C turned the loop into a spin that re-entered ctx.Done()
+// millions of times a second and started a fresh five-second killGroup
+// goroutine on every pass. That is how one interrupted session ate the whole
+// machine's memory. A cancel must cost exactly one kill.
+func TestDispatchCancelDoesNotSpin(t *testing.T) {
+	// The child ignores SIGTERM and then sits still, holding its stdout open:
+	// the shape of a real CLI that has children of its own and does not die
+	// the instant it is asked to. The cancel comes only once it is up, because
+	// a child killed before it installs the handler closes the pipe within
+	// microseconds and the window this bug lives in never opens at all.
+	script := "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); " +
+		`print('{"type":"system","subtype":"init","model":"m"}', flush=True); time.sleep(3)`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := runtime.NumGoroutine()
+	peak := make(chan int, 1)
+	out := make(chan Outcome, 1)
+	go func() {
+		out <- Dispatch(ctx, Provider{Command: []string{"python3", "-c", script}},
+			"p", ".", time.Minute, time.Minute, "")
+	}()
+	go func() {
+		hi := 0
+		for i := 0; i < 4000; i++ {
+			if n := runtime.NumGoroutine(); n > hi {
+				hi = n
+			}
+			time.Sleep(time.Millisecond)
+		}
+		peak <- hi
+	}()
+	time.Sleep(500 * time.Millisecond) // let the child install SIG_IGN
+	cancel()
+
+	select {
+	case o := <-out:
+		if o.Kind != OutFailed {
+			t.Errorf("Kind = %q (%s), want %q", o.Kind, o.Detail, OutFailed)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Dispatch never returned after its context was cancelled")
+	}
+	if hi := <-peak; hi-base > 50 {
+		t.Errorf("goroutines peaked %d over a baseline of %d — the spent ctx.Done() case is spinning", hi-base, base)
 	}
 }
