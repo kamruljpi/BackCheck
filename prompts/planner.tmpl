@@ -44,3 +44,10 @@ standards, "paste real output" rules, anything a builder is likely to cut corner
 - The last wave's criteria define the finish line of the whole plan.
 - Gate = fast, deterministic checks (build, lint, unit tests). Fingerprints = read-only
   samples of anything outside git (databases, external dirs) that must not change.
+- Set "browser" only if the plan changes something a person looks at. It gives both
+  models a real browser: they load the routes, screenshot them at each viewport and
+  read the console. Pick a PORT NOTHING ELSE USES — the build runs beside a developer
+  who already has the usual one. List only the routes this plan touches.
+- A browser does not lower the bar for acceptance criteria. "Renders correctly" is
+  still not checkable; "/invoices at 390px has no horizontal overflow and a clean
+  console" is, because the reviewer can load it and see for itself.

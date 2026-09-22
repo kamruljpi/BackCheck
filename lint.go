@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,13 @@ var (
 	reNonDeterministic = regexp.MustCompile(`(?i)(\bdate\b|\buptime\b|\bps\s|free\s+-|df\s+-|\$RANDOM|uuidgen)`)
 )
 
+// The ports a developer's own server is already sitting on. A build that
+// verifies one of these is not necessarily verifying the worktree.
+var busyDevPorts = map[string]string{
+	"3000": "Node/Next", "5173": "Vite", "8000": "Laravel/Django", "8080": "the usual spare",
+	"4200": "Angular", "5000": "Flask", "3001": "the usual second Node app",
+}
+
 // lintRails reads the rails a planner drafted and reports what a human should
 // look at. repoRoot is the main repo, used to tell an inert path from a real one.
 func lintRails(r railsFile, repoRoot string) []finding {
@@ -61,6 +69,9 @@ func lintRails(r railsFile, repoRoot string) []finding {
 			add("fingerprints."+c.Name, "looks non-deterministic — it would halt the build on its own, every session")
 		}
 	}
+	if b := r.Browser; b != nil && b.Enabled {
+		lintBrowser(b, add)
+	}
 	for _, p := range r.ReadonlyPaths {
 		clean := strings.TrimSuffix(p, "/")
 		if clean == "" {
@@ -75,6 +86,35 @@ func lintRails(r railsFile, repoRoot string) []finding {
 		}
 	}
 	return out
+}
+
+// lintBrowser covers the ways a browser-backed build passes while proving
+// nothing. All three have the same shape: the session really did drive a real
+// browser, and what it looked at was not this build's work.
+func lintBrowser(b *Browser, add func(where, what string)) {
+	if u, err := url.Parse(b.Serve.URL); err == nil {
+		if port := u.Port(); port != "" {
+			if what, busy := busyDevPorts[port]; busy {
+				add("browser.serve.url",
+					"port "+port+" is where "+what+" usually listens. The build runs beside a developer who "+
+						"may already have that port: the session would then screenshot THEIR app, "+
+						"see it working, and sign a wave that was never built. Pick a port nothing else uses")
+			}
+		}
+	}
+	if strings.TrimSpace(b.Serve.Run) == "" {
+		add("browser.serve.run",
+			"empty, so the build depends on a server someone starts by hand. Unattended, the first "+
+				"time it is not running every session retries until NEEDS_OPERATOR")
+	}
+	for name, m := range b.MCP {
+		joined := m.Command + " " + strings.Join(m.Args, " ")
+		if strings.Contains(joined, "playwright") && !strings.Contains(joined, "--headless") {
+			add("browser.mcp."+name,
+				"drives Playwright without --headless. Unattended there is usually no display to open "+
+					"a window on, and the session hangs on its first navigation until the idle watchdog kills it")
+		}
+	}
 }
 
 func printFindings(fs []finding) {

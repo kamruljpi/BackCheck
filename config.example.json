@@ -93,6 +93,41 @@
       "run": "psql \"$PROD_RO_URL\" -Atc \"select md5(string_agg(table_name||column_name, ',' order by 1)) from information_schema.columns where table_schema='public'\""
     }
   ],
+  "browser": {
+    "enabled": true,
+    "serve": {
+      "run": "php artisan serve --port=8123",
+      "url": "http://127.0.0.1:8123",
+      "ready_timeout_seconds": 60
+    },
+    "routes": [
+      "/",
+      "/invoices"
+    ],
+    "viewports": [
+      {
+        "name": "desktop",
+        "width": 1440,
+        "height": 900
+      },
+      {
+        "name": "mobile",
+        "width": 390,
+        "height": 844
+      }
+    ],
+    "mcp": {
+      "playwright": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@playwright/mcp@latest",
+          "--headless",
+          "--isolated"
+        ]
+      }
+    }
+  },
   "limits": {
     "session_wall_seconds": 5400,
     "session_idle_seconds": 900,

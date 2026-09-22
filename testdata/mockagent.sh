@@ -36,6 +36,8 @@ if grep -q "^ROLE: BUILDER" <<<"$prompt"; then role=builder
 elif grep -q "^ROLE: REVIEWER" <<<"$prompt"; then role=reviewer
 else role=planner; fi
 printf '%s' "$prompt" > "$MOCK_DIR/prompts/$n-$role.txt"
+# argv, so a test can prove which flags the driver actually handed the CLI
+printf '%s' "$*" > "$MOCK_DIR/prompts/$n-$role.argv"
 act=$(pop "$role")
 echo "$n $role $act ${MOCK_NAME:-x}" >> "$MOCK_DIR/log"
 emit_init

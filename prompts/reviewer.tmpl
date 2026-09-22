@@ -28,6 +28,20 @@ driver halts the build.
 
 ## Gate result (the driver ran your checks on this exact tree — judge it, don't recompute it)
 {{.Gate}}
+{{if .Browser}}
+## Browser verification — take your own screenshots
+The driver has already started the app at {{.Browser.URL}}. Do NOT start your own.
+The builder's PNGs are in {{.Browser.ShotsDir}}. They are a CLAIM, not evidence: an
+image proves only that something was once photographed, not that it is what ships.
+Drive the browser yourself through {{range .Browser.Servers}}{{.}} {{end}}and re-take
+every one, saving yours as {{.Browser.ShotsDir}}/review-<route>-<viewport>.png:
+{{range .Browser.Routes}}- route {{.}}
+{{end}}{{range .Browser.Viewports}}- viewport {{.Name}}: {{.Width}}x{{.Height}}
+{{end}}
+Open both sets and compare. Read the console on every page: errors there are BLOCKING
+defects even when the page looks correct. If what you see does not match what the
+builder described, that is a defect — say which file and exactly what differs.
+{{end}}
 {{if .Defects}}
 ## Defects from the previous round — confirm each is actually fixed
 {{.Defects}}
@@ -48,7 +62,10 @@ driver halts the build.
 
 ## Your final message — exactly this shape
 ### Re-run
-Each command you ran and what it actually printed.
+Each command you ran and what it actually printed.{{if .Browser}}
+### Rendered
+Each route+viewport you loaded yourself, the file you saved, what you saw, and what
+the console printed. Say plainly whether it matches the builder's account.{{end}}
 ### Defects
 One per line, numbered, most important first, blocking ones only:
 D1: <one-line headline> — <file/test> — <what fails and how to see it>

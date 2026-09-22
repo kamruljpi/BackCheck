@@ -145,6 +145,16 @@ func (d *Driver) Iterate(ctx context.Context) (stop bool) {
 	if !ok {
 		return false
 	}
+	// 5b · Bring the app up if a browser is wired in. It starts before the gate
+	// because a gate check may hit the URL too, and the deferred stop means a
+	// session that dies mid-wave leaves nothing listening on the port.
+	sv, serveMsg := d.startServer(ctx)
+	defer sv.Stop()
+	if serveMsg != "" {
+		d.retryLater(ctl, "browser: "+serveMsg)
+		return false
+	}
+
 	// 6 · Fingerprint sweep — before.
 	fpBefore := d.fingerprints(ctx)
 
@@ -153,8 +163,9 @@ func (d *Driver) Iterate(ctx context.Context) (stop bool) {
 
 	// 8 · Dispatch ONE session.
 	headBefore := gitHead(wt)
-	prompt := d.brief(ctl, wave, len(waves), gate, headBefore)
 	tag := sessionTag(ctl, role)
+	prompt := d.brief(ctl, wave, len(waves), gate, headBefore, tag)
+	prov = d.browserProvider(prov)
 	logPath := filepath.Join(cfg.sessionsDir(), tag+".stream.jsonl")
 	cfg.Emit("dispatch", ctl.Wave, fmt.Sprintf("%s session %s on %s", role, tag, provName), map[string]any{"provider": provName, "role": role})
 	d.consumeNote(tag)
@@ -588,7 +599,7 @@ func (d *Driver) fingerprintsMoved(ctx context.Context, before map[string]string
 	return moved
 }
 
-func (d *Driver) brief(ctl *Control, w Wave, total int, gate, head string) string {
+func (d *Driver) brief(ctl *Control, w Wave, total int, gate, head, tag string) string {
 	cfg, wt := d.cfg, d.cfg.WorktreePath()
 	pd := PromptData{
 		Worktree: wt, Branch: cfg.Branch, Wave: w, TotalWaves: total,
@@ -598,6 +609,12 @@ func (d *Driver) brief(ctl *Control, w Wave, total int, gate, head string) strin
 		Rules: cfg.LoadRules(), ReadonlyPaths: cfg.ReadonlyPaths,
 		Steps: cfg.Limits.StepsPerSession, OperatorNote: readFileOr(cfg.notePath(), ""),
 		Head: head, WaveBase: ctl.WaveBase,
+		Browser: cfg.browserBrief(tag),
+	}
+	if pd.Browser != nil {
+		// Created up front so a session cannot decide the directory is missing
+		// and quietly skip the screenshots.
+		_ = os.MkdirAll(pd.Browser.ShotsDir, 0o755)
 	}
 	if pd.PriorCommits == "" {
 		pd.PriorCommits = "(none yet)"
@@ -609,6 +626,23 @@ func (d *Driver) brief(ctl *Control, w Wave, total int, gate, head string) strin
 		return render("reviewer", pd)
 	}
 	return render("builder", pd)
+}
+
+// browserProvider hands one dispatch the browser MCP servers. mcp.json is
+// rewritten from config.json each time, so editing the rails mid-build changes
+// what the next session can reach — the promise the rest of the rails make.
+// A failure to write it is not worth halting a build over: the session simply
+// runs without a browser and the reviewer will find the missing evidence.
+func (d *Driver) browserProvider(p Provider) Provider {
+	if !d.cfg.BrowserOn() {
+		return p
+	}
+	path, err := d.cfg.writeMCPConfig()
+	if err != nil {
+		d.cfg.Emit("retry", 0, "browser: mcp.json: "+err.Error(), nil)
+		return p
+	}
+	return withMCP(p, path, d.cfg.Browser.StrictMCP())
 }
 
 // retryLater waits for something outside the build to get better. It says so

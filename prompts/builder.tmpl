@@ -35,6 +35,25 @@ answer each defect by its number (D1, D2, …) with the commit and the proof.
 {{end}}
 ## Gate result at session start (the driver ran it, not you)
 {{.Gate}}
+{{if .Browser}}
+## Browser verification (this wave is judged on what the page actually renders)
+The driver has already started the app. Do NOT start your own server.
+- Base URL: {{.Browser.URL}}
+- Drive a real browser through the MCP server(s): {{range .Browser.Servers}}{{.}} {{end}}
+- Screenshots go in {{.Browser.ShotsDir}} — the ONE path outside the working tree
+  you may write to. Never save images inside the working tree: that leaves it
+  dirty, which fails preflight and stops the build.
+
+Visit every route at every viewport — all of them, not just the desktop one:
+{{range .Browser.Routes}}- route {{.}}
+{{end}}{{range .Browser.Viewports}}- viewport {{.Name}}: {{.Width}}x{{.Height}}
+{{end}}
+For each combination: navigate, resize, screenshot to
+{{.Browser.ShotsDir}}/<route>-<viewport>.png, and READ THE BROWSER CONSOLE. A page
+that looks right while throwing in the console is a defect, not a pass. Look at the
+screenshots you took — that is the point of taking them; a screenshot you saved and
+never opened proves nothing and the reviewer will re-take it anyway.
+{{end}}
 {{if .OperatorNote}}
 ## Note from the operator
 {{.OperatorNote}}
@@ -48,7 +67,8 @@ answer each defect by its number (D1, D2, …) with the commit and the proof.
    (blank line before it). A killed session loses at most the step in flight.
 3. Never edit the read-only paths, never rewrite history (no rebase/amend/reset of
    earlier commits, no force), never touch files outside the working tree.
-4. Wrap: self-check against the acceptance criteria, run the full test suite, and
+4. Wrap: self-check against the acceptance criteria, run the full test suite,{{if .Browser}}
+   re-take the screenshots for anything you changed since you last looked,{{end}} and
    write the handoff below as your final message.
 
 ## The handoff (your final message — exactly this shape)
@@ -57,7 +77,10 @@ For each step: what changed, the commit SHA, the proof command, and its REAL out
 (paste it — trimmed if long, but real). A claim without pasted output counts as not run.
 ### Acceptance criteria
 Each criterion, and the command + real output that shows it holds (or that it does not yet).
-### Open
+{{if .Browser}}### Rendered
+Every screenshot you saved, by filename, with what you saw in it and what the console
+said. Name anything you changed BECAUSE a screenshot showed it.
+{{end}}### Open
 Anything unfinished, uncertain or deliberately deferred.
 
 The very last line must be exactly one of:
