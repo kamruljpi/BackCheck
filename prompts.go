@@ -33,6 +33,7 @@ type PromptData struct {
 	Head, WaveBase   string
 	Plan, Files      string
 	FileLimit        int
+	Browser          *BrowserBrief
 }
 
 func render(name string, d PromptData) string {

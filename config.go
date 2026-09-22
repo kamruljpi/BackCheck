@@ -73,6 +73,7 @@ type Config struct {
 	Fingerprints  []Check             `json:"fingerprints"`
 	Limits        Limits              `json:"limits"`
 	Notify        Notify              `json:"notify"`
+	Browser       Browser             `json:"browser,omitempty"`
 
 	// resolved at load time
 	root     string // main repo root (where .backcheck lives)
@@ -191,6 +192,7 @@ func LoadConfig(root string) (*Config, error) {
 	c.root = root
 	c.stateDir = stateDir
 	c.Limits.fillDefaults()
+	c.Browser.fillDefaults()
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -222,6 +224,7 @@ func (c *Config) validate() error {
 	if c.Branch == "" {
 		errs = append(errs, "branch empty")
 	}
+	errs = append(errs, c.Browser.validate()...)
 	if len(errs) > 0 {
 		return fmt.Errorf("config.json: %s", strings.Join(errs, "; "))
 	}

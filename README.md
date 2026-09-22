@@ -17,6 +17,7 @@ Single Go binary, standard library only.
 | A CLI that speaks Claude Code `stream-json` (normally `claude`) | no | **yes** |
 | Go 1.21 or newer | **yes** | no |
 | `notify-send` (Linux) / `osascript` (macOS) | no | optional — desktop alerts |
+| `node` + `npx` | no | optional — only for `browser` verification |
 
 **Supported platforms: Linux and macOS only**, on `amd64` or `arm64`. BackCheck
 uses `flock` and POSIX process groups, so Windows is not supported (WSL2 works,
@@ -364,6 +365,62 @@ which runs before every session and costs no model time.
 
 ---
 
+## Browser verification
+
+A gate check can prove `/invoices` returns 200. It cannot prove the page is not
+three overlapping divs, and neither can a model that only ever read the Blade
+template. Turn on `browser` and both models get a real one.
+
+```jsonc
+"browser": {
+  "enabled": true,
+  "serve": { "run": "php artisan serve --port=8123", "url": "http://127.0.0.1:8123" },
+  "routes": ["/", "/invoices"],
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "mobile",  "width": 390,  "height": 844 }
+  ],
+  "mcp": {
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated"] }
+  }
+}
+```
+
+`"browser": { "enabled": true }` on its own works too: everything above has a
+default. What it changes:
+
+- **The driver owns the server.** It starts `serve.run` in the worktree before
+  the gate, waits for `serve.url` to answer, and kills the whole process group
+  when the session ends. A dev server that outlives its build is a dev server the
+  *next* build will screenshot.
+- **Sessions get the browser.** `mcp.json` is generated from `config.json` and
+  passed as `--mcp-config … --strict-mcp-config`, so a session sees exactly the
+  servers you declared and nothing the developer happens to have configured
+  globally. Regenerated every dispatch, like every other rail.
+- **Both models look.** The builder loads every route at every viewport,
+  screenshots each one and reads the console. The reviewer is told the builder's
+  PNGs are a *claim* and re-takes its own. Console errors are blocking defects
+  even when the page looks right.
+- **Screenshots land in `.backcheck/sessions/<tag>.shots/`**, never in the
+  worktree — an image dropped in the tree makes it dirty, which fails preflight
+  and makes the gate uncacheable.
+
+`backcheck rehearse` proves the whole path before the build spends anything: the
+MCP command is on `PATH`, the server starts, the URL answers.
+
+> **Pick a port nothing else uses.** The build runs beside you. If `serve.url` is
+> on `:8000` and your own app is already there, the session screenshots *your*
+> app, sees it working, and signs a wave that was never built. `rails lint` flags
+> the usual suspects (3000, 5173, 8000, 8080…), but it only knows the common ones.
+
+Both viewports are listed explicitly on purpose: a model told to "check it looks
+right" checks desktop and stops. And a browser does not lower the bar for
+acceptance criteria — "renders correctly" is still not checkable, while
+"`/invoices` at 390px has no horizontal overflow and a clean console" is, because
+the reviewer can load it and see for itself.
+
+---
+
 ## Desktop alerts
 
 `notify.command` fires for `halt`, `needs-operator`, `closed` and `model-mismatch`
@@ -429,6 +486,9 @@ backcheck squash          one commit per wave on an export branch
   ledger.jsonl    one row per signed wave
   events.jsonl    append-only log — the watcher's feed, and the cost record
   sessions/       every handoff, review, raw stream and delivered note
+    *.shots/      screenshots each session took, builder's and reviewer's
+    serve.log     the dev server's output, bounded
+  mcp.json        generated from config.json when browser is on
   keeper.log      the driver's own output
 ```
 

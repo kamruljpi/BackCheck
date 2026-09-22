@@ -28,7 +28,7 @@ setup (once):
                                   providers stay yours to write
   backcheck plan PLAN.md            planner drafts waves, rules, gate → .backcheck/draft/
   backcheck approve [--yes]         you bless the rails; creates the worktree + control file
-  backcheck rehearse                preflight, probes, fingerprints, gate — no session spent
+  backcheck rehearse                preflight, probes, browser, fingerprints, gate — no session spent
 
 running:
   backcheck keeper                  supervise the driver (restart if it dies) — use this
@@ -212,6 +212,7 @@ type railsFile struct {
 	Preflight     []Check  `json:"preflight"`
 	ReadonlyPaths []string `json:"readonly_paths"`
 	Fingerprints  []Check  `json:"fingerprints"`
+	Browser       *Browser `json:"browser,omitempty"`
 }
 
 // approve: the planner drafted the rails; it cannot also bless them.
@@ -251,6 +252,9 @@ func cmdApprove(args []string) error {
 	fmt.Printf("Preflight:   %s\n", checkNames(orChecks(rails.Preflight, cfg.Preflight)))
 	fmt.Printf("Fingerprint: %s\n", checkNames(orChecks(rails.Fingerprints, cfg.Fingerprints)))
 	fmt.Printf("Read-only:   %s\n", strings.Join(orStrings(rails.ReadonlyPaths, cfg.ReadonlyPaths), ", "))
+	if b := orBrowser(rails.Browser, &cfg.Browser); b.Enabled {
+		fmt.Printf("Browser:     %s\n", browserSummary(b))
+	}
 	fmt.Printf("Builder: %s   Reviewer: %s\n", cfg.Roles["builder"].Provider, cfg.Roles["reviewer"].Provider)
 	if cfg.SingleProvider() {
 		fmt.Println("WARNING: builder and reviewer share one provider — the strongest property is off.")
@@ -280,6 +284,9 @@ func cmdApprove(args []string) error {
 	}
 	if rails.Fingerprints != nil {
 		raw["fingerprints"] = rails.Fingerprints
+	}
+	if rails.Browser != nil {
+		raw["browser"] = rails.Browser
 	}
 	b, _ := json.MarshalIndent(raw, "", "  ")
 	if err := os.WriteFile(filepath.Join(cfg.stateDir, "config.json"), b, 0o644); err != nil {
@@ -698,7 +705,11 @@ func cmdAuto(args []string) error {
 		fmt.Printf("  gate        %s\n", checkNames(rails.Gate))
 		fmt.Printf("  preflight   %s\n", checkNames(rails.Preflight))
 		fmt.Printf("  fingerprint %s\n", checkNames(rails.Fingerprints))
-		fmt.Printf("  read-only   %s\n\n", strings.Join(orStrings(rails.ReadonlyPaths, []string{"(none)"}), ", "))
+		fmt.Printf("  read-only   %s\n", strings.Join(orStrings(rails.ReadonlyPaths, []string{"(none)"}), ", "))
+		if b := orBrowser(rails.Browser, &cfg.Browser); b.Enabled {
+			fmt.Printf("  browser     %s\n", browserSummary(b))
+		}
+		fmt.Println()
 		printFindings(lintRails(rails, cfg.root))
 		return rails, nil
 	}
@@ -892,6 +903,14 @@ func cmdRehearse(args []string) error {
 	default:
 		err := cfg.Notify1("rehearse", 0, "backcheck rehearsal — this is what a HALT will look like", 15*time.Second)
 		report("notify", err == nil, strings.Join(cfg.Notify.Command, " ")+" "+errStr(err))
+	}
+
+	// The browser comes up before the gate, because a gate check may load the
+	// URL too, and stays up until rehearse is done with it.
+	if cfg.BrowserOn() {
+		sv, detail, good := d.rehearseBrowser(ctx)
+		defer sv.Stop()
+		report("browser", good, detail)
 	}
 
 	fp := d.fingerprints(ctx)
