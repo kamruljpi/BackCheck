@@ -403,3 +403,81 @@ func TestRehearseBrowser(t *testing.T) {
 		}
 	})
 }
+
+// rails.json is written by a model. When it has to guess a shape it guesses
+// plausibly, and a strict decoder turns each plausible guess into a build that
+// cannot start — over a field that has a perfectly good default. This is the
+// exact payload that broke a real draft: "viewports":[1440,390].
+func TestViewportAcceptsWhatAPlannerWrites(t *testing.T) {
+	for _, tc := range []struct {
+		json string
+		want Viewport
+	}{
+		{`{"name":"desktop","width":1440,"height":900}`, Viewport{"desktop", 1440, 900}},
+		{`{"width":1440,"height":900}`, Viewport{"desktop", 1440, 900}},
+		{`{"width":390,"height":844}`, Viewport{"mobile", 390, 844}},
+		{`1440`, Viewport{"desktop", 1440, 900}},
+		{`390`, Viewport{"mobile", 390, 844}},
+		{`800`, Viewport{"tablet", 800, 1024}},
+		{`"1440x900"`, Viewport{"desktop", 1440, 900}},
+		{`"390X844"`, Viewport{"mobile", 390, 844}},
+		{`"1440×900"`, Viewport{"desktop", 1440, 900}},
+		{`"mobile: 390x844"`, Viewport{"mobile", 390, 844}},
+		{`"phone 390x844"`, Viewport{"phone", 390, 844}},
+		{`"1440"`, Viewport{"desktop", 1440, 900}},
+		{`[1440,900]`, Viewport{"desktop", 1440, 900}},
+	} {
+		var got Viewport
+		if err := json.Unmarshal([]byte(tc.json), &got); err != nil {
+			t.Errorf("%s: %v", tc.json, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s = %+v, want %+v", tc.json, got, tc.want)
+		}
+	}
+}
+
+func TestViewportRejectsNonsenseReadably(t *testing.T) {
+	for _, bad := range []string{`"wide"`, `{"width":0,"height":0,"name":""}`, `true`, `[1,2,3]`, `0`} {
+		var got Viewport
+		err := json.Unmarshal([]byte(bad), &got)
+		if bad == `{"width":0,"height":0,"name":""}` {
+			// Structurally fine; validate() is what rejects a zero viewport.
+			if err != nil {
+				t.Errorf("%s should decode and fail validation, not decoding: %v", bad, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s decoded to %+v, want an error", bad, got)
+			continue
+		}
+		// The message has to tell someone editing JSON what to type, not name
+		// a Go type they have never heard of.
+		if !strings.Contains(err.Error(), `"width"`) || strings.Contains(err.Error(), "main.Viewport") {
+			t.Errorf("%s: unhelpful error %q", bad, err)
+		}
+	}
+}
+
+// The whole railsFile, as the planner emits it, with the bad viewports.
+func TestRailsFileSurvivesBareWidths(t *testing.T) {
+	var r railsFile
+	src := `{"gate":[{"name":"t","run":"true"}],
+	         "browser":{"enabled":true,"serve":{"run":"x","url":"http://127.0.0.1:8123"},
+	                    "routes":["/"],"viewports":[1440,390]}}`
+	if err := json.Unmarshal([]byte(src), &r); err != nil {
+		t.Fatalf("the draft that broke a real build still does not parse: %v", err)
+	}
+	if len(r.Browser.Viewports) != 2 ||
+		r.Browser.Viewports[0] != (Viewport{"desktop", 1440, 900}) ||
+		r.Browser.Viewports[1] != (Viewport{"mobile", 390, 844}) {
+		t.Fatalf("viewports = %+v", r.Browser.Viewports)
+	}
+	// And what was read is shown before anyone approves it.
+	if s := browserSummary(orBrowser(r.Browser, &Browser{})); !strings.Contains(s, "desktop 1440x900") ||
+		!strings.Contains(s, "mobile 390x844") {
+		t.Fatalf("approve would not show the inferred viewports: %s", s)
+	}
+}

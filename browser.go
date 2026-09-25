@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -65,6 +66,104 @@ type Viewport struct {
 	Name   string `json:"name"`
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
+}
+
+// UnmarshalJSON accepts the shapes a planner actually writes, not just the one
+// we document. rails.json is produced by a model: when it has to guess it
+// guesses plausibly — a bare width, a "1440x900" string, a [w,h] pair — and a
+// strict decoder turns each of those into a build that cannot start, over a
+// field that has a perfectly good default. Whatever is read is printed back by
+// `approve` before a human blesses it, so a generous reading is never a silent
+// one.
+func (v *Viewport) UnmarshalJSON(b []byte) error {
+	trimmed := strings.TrimSpace(string(b))
+	switch {
+	case strings.HasPrefix(trimmed, "{"):
+		type plain Viewport // shed the method, or this recurses
+		var p plain
+		if err := json.Unmarshal(b, &p); err != nil {
+			return err
+		}
+		*v = Viewport(p)
+		if v.Name == "" {
+			v.Name = viewportFromWidth(v.Width).Name
+		}
+		return nil
+
+	case strings.HasPrefix(trimmed, "["):
+		var pair []int
+		if err := json.Unmarshal(b, &pair); err == nil && len(pair) == 2 {
+			*v = Viewport{Name: viewportFromWidth(pair[0]).Name, Width: pair[0], Height: pair[1]}
+			return nil
+		}
+
+	case strings.HasPrefix(trimmed, `"`):
+		var s string
+		if err := json.Unmarshal(b, &s); err == nil {
+			if got, ok := parseViewportString(s); ok {
+				*v = got
+				return nil
+			}
+		}
+
+	default:
+		var w int
+		if err := json.Unmarshal(b, &w); err == nil && w > 0 {
+			*v = viewportFromWidth(w)
+			return nil
+		}
+	}
+	return fmt.Errorf(`browser.viewports: cannot read %s as a viewport — write `+
+		`{"name":"desktop","width":1440,"height":900}, or "1440x900", or just 1440`, trimmed)
+}
+
+// parseViewportString reads "1440x900", "mobile: 390x844", "mobile 390x844"
+// and a bare "1440".
+func parseViewportString(s string) (Viewport, bool) {
+	s = strings.TrimSpace(s)
+	name := ""
+	if i := strings.IndexAny(s, ":="); i >= 0 {
+		name, s = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	} else if f := strings.Fields(s); len(f) == 2 {
+		name, s = f[0], f[1]
+	}
+	// One spelling of the separator, whichever was typed.
+	s = strings.NewReplacer("X", "x", "\u00d7", "x", "*", "x").Replace(strings.TrimSpace(s))
+	var w, h int
+	switch parts := strings.Split(s, "x"); len(parts) {
+	case 1:
+		if n, err := strconv.Atoi(parts[0]); err == nil && n > 0 {
+			v := viewportFromWidth(n)
+			if name != "" {
+				v.Name = name
+			}
+			return v, true
+		}
+	case 2:
+		w, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
+		h, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+		if w > 0 && h > 0 {
+			if name == "" {
+				name = viewportFromWidth(w).Name
+			}
+			return Viewport{Name: name, Width: w, Height: h}, true
+		}
+	}
+	return Viewport{}, false
+}
+
+// viewportFromWidth supplies a plausible device height and name for a width
+// given on its own. The guess only decides how tall a screenshot is, not
+// whether the layout is right, and it is shown at approval.
+func viewportFromWidth(w int) Viewport {
+	switch {
+	case w >= 1280:
+		return Viewport{Name: "desktop", Width: w, Height: 900}
+	case w >= 768:
+		return Viewport{Name: "tablet", Width: w, Height: 1024}
+	default:
+		return Viewport{Name: "mobile", Width: w, Height: 844}
+	}
 }
 
 func (v Viewport) String() string { return fmt.Sprintf("%s %dx%d", v.Name, v.Width, v.Height) }
