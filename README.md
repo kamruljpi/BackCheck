@@ -408,6 +408,13 @@ default. What it changes:
 `backcheck rehearse` proves the whole path before the build spends anything: the
 MCP command is on `PATH`, the server starts, the URL answers.
 
+> **Download Chromium before the first build**, not during it. Playwright fetches
+> a few hundred MB the first time it runs, and if that happens inside a session
+> it happens on the session clock — where the idle watchdog cannot tell a slow
+> download from a hung model. `./install.sh --browser` gets it out of the way
+> (or `npx playwright install chromium`). `./install.sh --check` reports whether
+> you already have it.
+
 > **Pick a port nothing else uses.** The build runs beside you. If `serve.url` is
 > on `:8000` and your own app is already there, the session screenshots *your*
 > app, sees it working, and signs a wave that was never built. `rails lint` flags

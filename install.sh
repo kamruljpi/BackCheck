@@ -6,11 +6,16 @@
 #   ./install.sh --no-test       skip the test suite (not recommended)
 #   ./install.sh --check         report what is missing and install nothing
 #   ./install.sh --binary FILE   install an already-built binary; needs no Go
+#   ./install.sh --browser       also download the Chromium the browser rails drive
 #
 # Go is needed to BUILD backcheck, not to run it: the binary is statically linked
 # and depends on nothing, so on a machine without Go you can install one built
 # elsewhere (`make dist` produces them). git and a provider CLI are needed
 # either way — those are what backcheck actually drives.
+#
+# Browser verification ("browser" in config.json) is opt-in per project, so its
+# prerequisites are reported and never enforced. --browser downloads Chromium
+# now rather than letting the first session pay for it on the session clock.
 #
 # The checks below are not ceremony: each one is something that, missing, makes
 # a build fail in a way that is tedious to diagnose at 3am.
@@ -21,8 +26,10 @@ PREFIX=""
 RUN_TESTS=1
 CHECK_ONLY=0
 BINARY=""
+PREP_BROWSER=0
 MIN_GO_MAJOR=1
 MIN_GO_MINOR=21
+MIN_NODE_MAJOR=18   # what @playwright/mcp needs
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,7 +39,8 @@ while [ $# -gt 0 ]; do
     --check)    CHECK_ONLY=1; shift ;;
     --binary)   BINARY="${2:-}"; shift 2 ;;
     --binary=*) BINARY="${1#*=}"; shift ;;
-    -h|--help)  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --browser)  PREP_BROWSER=1; shift ;;
+    -h|--help)  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *)          echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -57,17 +65,19 @@ case "$(uname -s)" in
      note_problem ;;
 esac
 
-# If no binary was handed to us, look for one built earlier — then Go is
-# only needed as a last resort.
-if [ -z "$BINARY" ]; then
-  for cand in "./backcheck" "./dist/backcheck-$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; do
-    [ -x "$cand" ] && { BINARY="$cand"; break; }
-  done
-fi
+# Where the binary comes from. An explicit --binary wins. Otherwise Go wins,
+# because a checkout of this repo carries a COMMITTED ./backcheck that is
+# whatever was last built — installing that instead of the source you are
+# standing in is the kind of surprise that costs an afternoon. A prebuilt
+# binary is the answer only when there is no Go to build with.
+PREBUILT=""
+for cand in "./backcheck" "./dist/backcheck-$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; do
+  [ -x "$cand" ] && { PREBUILT="$cand"; break; }
+done
 
 if [ -n "$BINARY" ]; then
   if [ -x "$BINARY" ]; then
-    ok "using the prebuilt binary $BINARY (no Go needed)"
+    ok "installing the binary you named: $BINARY (no Go needed)"
   else
     fail "$BINARY is not an executable file"; note_problem
   fi
@@ -77,10 +87,14 @@ elif command -v go >/dev/null 2>&1; then
   MAJ="${GV%%.*}"; REST="${GV#*.}"; MIN="${REST%%.*}"
   if [ "${MAJ:-0}" -gt "$MIN_GO_MAJOR" ] 2>/dev/null ||
      { [ "${MAJ:-0}" -eq "$MIN_GO_MAJOR" ] && [ "${MIN:-0}" -ge "$MIN_GO_MINOR" ]; } 2>/dev/null; then
-    ok "go $GV"
+    ok "go $GV — building from this source tree"
   else
     fail "go $GV is older than $MIN_GO_MAJOR.$MIN_GO_MINOR"; note_problem
   fi
+elif [ -n "$PREBUILT" ]; then
+  BINARY="$PREBUILT"
+  ok "no Go here, so installing the prebuilt $PREBUILT"
+  warn "that binary is whatever was last committed — it may be older than this source"
 else
   fail "no Go, and no prebuilt binary to install."
   echo "        Either install Go (https://go.dev/dl/), or build backcheck on a"
@@ -115,6 +129,65 @@ case "$(uname -s)" in
       ok "osascript available — see README for the notify wrapper"
     fi ;;
 esac
+
+# Browser verification drives a real Chromium through an MCP server. It is
+# opt-in per project, so nothing here is fatal — but a missing piece does not
+# announce itself: it surfaces as a session that sits there until the idle
+# watchdog kills it, which reads exactly like a hung model.
+echo
+bold "Browser verification (only if you set \"browser\": {\"enabled\": true})"
+BROWSER_READY=1
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "${NODE_MAJOR:-0}" -ge "$MIN_NODE_MAJOR" ] 2>/dev/null; then
+    ok "node $(node -v)"
+  else
+    warn "node $(node -v) is older than v$MIN_NODE_MAJOR, which @playwright/mcp needs"
+    BROWSER_READY=0
+  fi
+else
+  warn "no node — needed only for browser verification"
+  BROWSER_READY=0
+fi
+if command -v npx >/dev/null 2>&1; then
+  ok "npx (runs @playwright/mcp)"
+else
+  warn "no npx — needed only for browser verification"
+  BROWSER_READY=0
+fi
+
+case "$(uname -s)" in
+  Darwin) PW_CACHE="$HOME/Library/Caches/ms-playwright" ;;
+  *)      PW_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ms-playwright" ;;
+esac
+
+if [ "$BROWSER_READY" -eq 1 ]; then
+  if ls -d "$PW_CACHE"/chromium-* >/dev/null 2>&1; then
+    ok "Chromium is downloaded ($PW_CACHE)"
+  elif [ "$PREP_BROWSER" -eq 1 ]; then
+    echo "  downloading Chromium (a few hundred MB, once) …"
+    if npx -y playwright@latest install chromium; then
+      ok "Chromium downloaded"
+    else
+      warn "the Chromium download failed — run 'npx playwright install chromium' yourself"
+    fi
+    # Warm the MCP package into the npx cache too, so the first session does
+    # not spend its clock fetching that either.
+    npx -y @playwright/mcp@latest --help >/dev/null 2>&1 && ok "@playwright/mcp cached" || true
+    if [ "$(uname -s)" = "Linux" ]; then
+      echo "  if a headless page never loads, the system libraries are missing:"
+      echo "        sudo npx playwright install-deps chromium"
+    fi
+  else
+    warn "Chromium is not downloaded yet. The first browser session would fetch it"
+    echo "        on the session clock, and the idle watchdog cannot tell a download"
+    echo "        from a hung model. Get it out of the way now:"
+    echo "            ./install.sh --browser"
+  fi
+elif [ "$PREP_BROWSER" -eq 1 ]; then
+  fail "--browser needs node and npx"
+  note_problem
+fi
 
 if [ "$PROBLEMS" -gt 0 ]; then
   echo
